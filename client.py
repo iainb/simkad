@@ -92,6 +92,7 @@ class Client:
             m['data'] = node.id
             self.send_message(dst_node.addr, dst_node.port, m)
             self.add_transaction(m['xid'], 'FIND_NODE', dst_node)
+            self.routing.performedLookup(dst_node)
 
     def handle_find_node(self, message):
         ''' handle_find_node looks for a node_id in the 'data
