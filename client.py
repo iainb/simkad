@@ -3,6 +3,7 @@ from datastore.simple import simple
 
 import random
 import time
+import hashlib
 
 import eventlet
 
@@ -77,6 +78,9 @@ class Client:
         }
 
     def load_initial_nodes(self):
+        ''' TODO: this need to be changed - as the find node needs to be
+        followed up with a bucket refresh after a response has been
+        recieved '''
         for node in self.initial_nodes:
             self.log("adding initial node %s" % node)
             self.routing.addNode(node)
@@ -90,9 +94,47 @@ class Client:
         for dst_node in nodes[:self.alpha]:
             m = self.create_message('FIND_NODE')
             m['data'] = node.id
-            self.send_message(dst_node.addr, dst_node.port, m)
             self.add_transaction(m['xid'], 'FIND_NODE', dst_node)
+            self.send_message(dst_node.addr, dst_node.port, m)
             self.routing.performedLookup(dst_node)
+
+    def perform_find_value(self, key):
+        ''' perform a 'FIND_VALUE' request for the given (string) key '''
+        key_hash = long(hashlib.sha1(key).digest())
+        destination = Node(None, None, key_hash)
+        nodes = self.routing.findClosestNodes(destination)
+        for dst_node in nodes[:self.alpha]:
+            m = self.create_message('FIND_VALUE')
+            m['data'] = {
+                'key': key,
+                'hash': key_hash
+            }
+            self.add_transaction(m['xid'], 'FIND_VALUE', dst_node)
+            self.send_message(dst_node.addr, dst_node.port, m)
+            self.routing.performedLookup(dst_node)
+
+    def perform_ping(self, node):
+        ''' perform a 'PING' request to the given node '''
+        m = self.create_message('PING')
+        self.send_message(node.addr, node.port, m)
+        self.add_transaction(m['xid'], 'PING', node)
+
+    def perform_store(self, key, value):
+        ''' find_node should be called before this, we need
+        to keep searching until we stop finding nodes closer
+        to the desired key '''
+
+        key_hash = long(hashlib.sha1(key).digest())
+        destination = Node(None, None, key_hash)
+        nodes = self.routing.findClosestNodes(destination)
+        for dst_node in nodes:
+            m = self.create_message('STORE')
+            m['data'] = {
+                'key': key,
+                'hash': key_hash,
+                'value': value
+            }
+            self.send_message(dst_node.addr, dst_node.port, m)
 
     def handle_find_node(self, message):
         ''' handle_find_node looks for a node_id in the 'data
@@ -117,18 +159,39 @@ class Client:
             del self.xids[message['xid']]
 
     def handle_ping(self, message):
-        pass
+        source = message['source']
+        m = self.create_message('PONG', message['xid'])
+        self.send_message(source.addr, source.port, m)
 
     def handle_pong(self, message):
-        pass
+        ''' the routing tree will have already been informed that
+        we have seen this node, so just delete it from the transaction
+        table '''
+        if 'xid' in message and message['xid'] in self.xids:
+            del self.xids[message['xid']]
 
     def handle_store(self, message):
-        required = ['key', 'value']
-        if all(k in message for k in required):
-            self.data_store[message['key']] = message['value']
+        ''' store key/value pair in the data store '''
+        required = ['key', 'key_hash', 'value']
+        data = message['data']
+        if all(k in data for k in required):
+            self.data_store.store(k['key'], k['key_hash'], k['value'])
 
     def handle_find_value(self, message):
-        pass
+        key_hash = message['data']['key_hash']
+        source = message['source']
+        value = self.data_store.retrieve_value(key_hash)
+        if value is not None:
+            response = { 'value' : value, 'found' : True }
+        else:
+            node_to_find = Node(None, None, key_hash)
+            nodes = self.routing.findClosestNodes(node_to_find)
+            nodes = [(n.addr, n.port, n.id) for n in nodes]
+            response = { 'value' : nodes, 'found' : True }
+
+        m = self.create_message('RETURN_VALUE', message['xid'])
+        m['data'] = response
+        self.send_message(source.addr, source.port, m)
 
     def process_message(self, m):
         if 'type' in m and m['type'] in self.actions:
@@ -183,5 +246,5 @@ class Client:
 
             self.run_events()
 
-            # allow other threads the change to run
+            # allow other threads the chance to run
             eventlet.sleep()
