@@ -4,6 +4,8 @@ from datastore.simple import simple
 import random
 import time
 
+import eventlet
+
 class Client:
     def __init__(self, network, addr=None, port=None, node_id=None, nodes = []):
         self.alpha = 3
@@ -29,11 +31,24 @@ class Client:
         self.data_store = simple()
         self.initial_nodes = nodes
         self.xids = {}
+        self.timers = {}
         self.debug = True
 
     def log(self, message):
         if self.debug:
             print "%s: %s" % (self.node, message)
+
+    def check_timer(self, name, wait):
+        if name in self.timers:
+            now = time.time()
+            if (now - self.timers[name]) >= wait:
+                self.timers[name] = now
+                return True
+            else:
+                return False
+        else:
+            self.timers[name] = time.time()
+            return False
 
     def return_node(self):
         return Node(self.node.addr, self.node.port, self.node.id)
@@ -65,7 +80,7 @@ class Client:
         for node in self.initial_nodes:
             self.log("adding initial node %s" % node)
             self.routing.addNode(node)
-        self.perform_lookup(self.node)
+        self.perform_find_node(self.node)
 
     def perform_find_node(self, node):
         ''' perform_find_node starts a FIND_NODE query
@@ -86,13 +101,14 @@ class Client:
         '''
         self.log('handle_find_node')
         source = message['source']
-        nodes = self.routing.findClosestNodes(Node(None,None,message['data']))
+        node_to_find = Node(None, None, message['data'])
+        nodes = self.routing.findClosestNodes(node_to_find)
         m = self.create_message('RETURN_NODE', message['xid'])
         m['data'] = [(n.addr, n.port, n.id) for n in nodes]
         self.send_message(source.addr, source.port, m)
 
     def handle_return_node(self, message):
-        self.log('handle_return_node')
+        self.log('handle_return_node %s' % message['xid'])
         if 'xid' in message and message['xid'] in self.xids:
             for node in message['data']:
                 n = Node(node[0], node[1], node[2])
@@ -125,18 +141,40 @@ class Client:
         else:
             self.log("process_message malformed message: %s" % m)
 
-
-
     def send_message(self, addr, port, message):
         self.log('send_message => %s:%s' % (addr, port))
         self.network.send(addr, port, message)
 
-    def main(self):
+    def run_events(self):
+        ''' run_events checks for any events which need to be run
+        periodically, such as:
+
+        * timing out rpc requests
+        * refreshing buckets
+        '''
+
+        '''
+        if self.check_timer('refresh_buckets', 5):
+            self.perform_find_node(self.node)
+        '''
+
+        if self.check_timer('debug', 5):
+            c = 0
+            for i in self.routing.buckets:
+                c = c + len(i.nodes)
+            self.log("Know about %s nodes" % c)
+
+    def main(self, wait = None):
+        if wait is not None:
+            eventlet.sleep(wait)
         self.load_initial_nodes()
         while True:
-            message = None
             try:
                 message = self.queue.get(block=True, timeout=5)
                 self.process_message(message)
-            except:
-                pass
+            except: pass
+
+            self.run_events()
+
+            # allow other threads the change to run
+            eventlet.sleep()

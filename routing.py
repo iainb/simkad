@@ -234,14 +234,6 @@ class RoutingTree:
         '''
         index = self.bucketIndex(node)
 
-        # if we know of the node in question return only it
-        # and it is not our node
-        if node is not self.node:
-            try:
-                return [self.buckets[index].getNode(node)]
-            except ValueError:
-                pass
-
         # fetch all nodes from the nearest bucket
         nodes = self.buckets[index].getNodes()
 
