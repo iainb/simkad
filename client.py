@@ -145,6 +145,11 @@ class Client:
         self.log('send_message => %s:%s' % (addr, port))
         self.network.send(addr, port, message)
 
+    def refresh_buckets(self, force=False):
+        nodes  = self.routing.fetchRefreshNodes(force)
+        for node in nodes:
+            self.perform_find_node(node)
+
     def run_events(self):
         ''' run_events checks for any events which need to be run
         periodically, such as:
@@ -153,11 +158,11 @@ class Client:
         * refreshing buckets
         '''
 
-        '''
-        if self.check_timer('refresh_buckets', 5):
-            self.perform_find_node(self.node)
-        '''
+        # refresh any buckets which need refreshing
+        if self.check_timer('refresh_buckets', 60):
+            self.refresh_buckets()
 
+        # debug info - delete this
         if self.check_timer('debug', 5):
             c = 0
             for i in self.routing.buckets:
@@ -168,6 +173,7 @@ class Client:
         if wait is not None:
             eventlet.sleep(wait)
         self.load_initial_nodes()
+
         while True:
             try:
                 message = self.queue.get(block=True, timeout=5)

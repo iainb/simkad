@@ -1,5 +1,6 @@
 import time
 from bisect import bisect_left
+import random
 
 class Node:
     ''' Node class contains information about a node in the k network '''
@@ -67,7 +68,7 @@ class Kbucket:
             * error_threshold - number of errors a node can suffer before
               being removed from the bucket as stale.
         '''
-        self.last_accessed = time.time()
+        self.last_lookup = 0
         self.range_min = range_min
         self.range_max = range_max
         self.k = k
@@ -86,6 +87,17 @@ class Kbucket:
                 self.nodes.remove(node)
 
         return evicted
+
+    def needsRefresh(self):
+        if (time.time() - self.last_lookup) > 3600:
+            return True
+        else:
+            return False
+
+    def performedLookup(self):
+        ''' performedLookup is called by the client to indicate
+        that a lookup has been performed on this bucket range '''
+        self.last_lookup = time.time()
 
     def addNode(self, node, updateSeen=True):
         ''' addNode adds a new node to the bucket, if the bucket is
@@ -110,6 +122,9 @@ class Kbucket:
         '''
         idx = self.nodes.index(node)
         return self.nodes[idx]
+
+    def getRandomNode(self):
+        return random.choice(self.nodes)
 
     def getNodes(self, count=None):
         ''' getNodes returns a fixed number of nodes from the bucket '''
@@ -271,6 +286,20 @@ class RoutingTree:
 
         # return at most self.k nodes
         return nodes[:self.k]
+
+    def fetchRefreshNodes(self, force=False):
+        nodes = []
+        for bucket in self.buckets:
+            if force:
+                nodes.append(bucket.getRandomNode())
+            elif bucket.needsRefresh():
+                nodes.append(bucket.getRandomNode())
+
+        return nodes
+
+    def performedLookup(self, node):
+        index = self.bucketIndex(node)
+        self.buckets[index].performedLookup()
 
     def errorNode(self, node):
         ''' indicate that a node has not responded to a request of some
