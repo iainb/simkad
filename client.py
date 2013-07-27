@@ -8,32 +8,125 @@ import hashlib
 import eventlet
 
 class Client:
-    def __init__(self, network, addr=None, port=None, node_id=None, nodes = []):
-        self.alpha = 3
+    def __init__(self, network, node=None, alpha = 3):
+        self.alpha = alpha
+        self.node  = node
         self.network = network
-        self.addr, self.port, self.queue = self.network.connect(addr, port)
 
-        if node_id is None:
-            node_id = random.randint(0,2**160)
+        self.pool = eventlet.greenpool.GreenPool(100)
 
-        self.node    = Node(self.addr, self.port ,node_id)
+        # we must comminicate with the rpc client via this queue
+        # which operates as a channel.
+        self.rpc_client_queue = eventlet.queue.Queue()
+        self.rpc_client = RPCClient(self.network, self.rpc_client_queue,
+            self.node, self.alpha)
+
+        # unique id's that the rpc client can use to handle
+        # requests
+        self.action_id = 0
+
+    def create_message(self, m_type):
+        self.action_id = self.action_id + 1
+        return {
+            'type' : m_type,
+            'data' : {},
+            'id'   : self.action_id
+        }
+
+    def send_internal_message(self, message):
+        m = {
+            'type' : 'internal',
+            'data' : message
+        }
+        self.rpc_client_queue.put(m)
+
+    def join_network(self, nodes):
+        ''' join_network consists of several steps:
+        1. Insert the known nodes into the routing tree
+        2. Perform a 'FIND_NODE' looking for our own node.id
+        3. Once (2) has finished we must refresh all kbuckets in the routing
+           tree'''
+        self._join_network(nodes)
+
+    def _join_network(self, nodes):
+        queue = eventlet.queue.Queue()
+        m = self.create_message('ADD_NODES')
+        m['data']['queue'] = queue
+        m['data']['nodes'] = nodes
+        self.send_internal_message(m)
+
+        # now we block and wait for a message back to the queue
+        response = queue.get(block=True)
+        print response
+
+        m.self.create_message('FIND_NODE')
+        m['data']['queue'] = queue
+        m['data']['node']  = self.node
+        self.send_internal_message(m)
+        response = queue.get(block=True)
+        print response
+
+        m.self.create_message('REFRESH_BUCKETS')
+        self.send_internal_message(m)
+
+    def store_value(self, key, value):
+        ''' store
+        '''
+
+    def find_node(self, node):
+        ''' blah
+        '''
+
+    def node_lookup(self, node):
+        ''' node_lookup locates the k (20 in the kad paper) nearest nodes
+        to a given node. This is a recursive algorithm that stops when
+        '''
+
+
+class RPCClient:
+    def __init__(self, network, queue, node=None, alpha = 3):
+        self.alpha = alpha  # concurrent network queries
+        self.queue = eventlet.queue.Queue()
+        self.network = network
+
+        if node == None:
+            node = Node(None, None, None)
+
+        self.addr, self.port = self.network.connect(self.queue, node.addr, node.port)
+
+        if node.id is None:
+            node.id = random.randint(0,2**160)
+
+        self.node    = node
 
         self.routing = RoutingTree(self.node)
 
-        self.actions = {
-            'PING'        : self.handle_ping,
-            'PONG'        : self.handle_pong,
-            'STORE'       : self.handle_store,
-            'FIND_VALUE'  : self.handle_find_value,
-            'FIND_NODE'   : self.handle_find_node,
-            'RETURN_NODE' : self.handle_return_node
+        self.network_actions = {
+            'PING'         : self.handle_ping,
+            'PONG'         : self.handle_pong,
+            'STORE'        : self.handle_store,
+            'FIND_VALUE'   : self.handle_find_value,
+            'FIND_NODE'    : self.handle_find_node,
+            'RETURN_NODE'  : self.handle_return_node,
+            'RETURN_VALUE' : self.handle_return_value
+        }
+
+        self.internal_actions = {
+            'JOIN'     : self.handle_internal,
+            'STORE'    : self.handle_internal,
+            'FETCH'    : self.handle_internal,
+            'ADD_NODE' : self.handle_internal,
+            'FETCH_NODES' : self.handle_internal
         }
 
         self.data_store = simple()
-        self.initial_nodes = nodes
         self.xids = {}
         self.timers = {}
         self.debug = True
+
+    def handle_internal(self):
+        ''' NOT TO BE IMPLEMENTED '''
+        pass
 
     def log(self, message):
         if self.debug:
@@ -193,8 +286,16 @@ class Client:
         m['data'] = response
         self.send_message(source.addr, source.port, m)
 
-    def process_message(self, m):
-        if 'type' in m and m['type'] in self.actions:
+    def handle_return_value(self, message):
+        ''' this needs to be coordinatied with other queries '''
+        pass
+
+    def process_internal_message(self, m):
+        ''' handle messages from ourselves '''
+        pass
+
+    def process_public_message(self, m):
+        if 'type' in m and m['type'] in self.network_actions:
             # add node into our routing tree
             node = Node(m['source'][0], m['source'][1], m['source'][2])
             self.routing.addNode(node)
@@ -241,7 +342,11 @@ class Client:
         while True:
             try:
                 message = self.queue.get(block=True, timeout=5)
-                self.process_message(message)
+                if 'type' in message and message['type'] == 'public':
+                    self.process_network_message(message)
+                elif 'type' in message and message['type'] == 'internal':
+                    self.process_internal_message(message)
+
             except: pass
 
             self.run_events()

@@ -2,6 +2,7 @@ from eventlet import greenpool
 import eventlet
 from client import Client
 from network.simulate import Simulate
+from routing import Node
 
 import random
 
@@ -16,7 +17,7 @@ def spawn_client(pool, network, initial_node=None):
         nodes = []
     else:
         nodes = [initial_node]
-    c = Client(network, nodes=nodes)
+    c = Client(network)
     pool.spawn(c.main, random.randint(1,10))
     return c.return_node()
 
