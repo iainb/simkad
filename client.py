@@ -4,95 +4,106 @@ from datastore.simple import simple
 import random
 import time
 import hashlib
+import traceback
 
-import eventlet
+import gevent
+from gevent.queue import Queue, Empty
 
-class Client:
-    def __init__(self, network, node=None, alpha = 3):
-        self.alpha = alpha
-        self.node  = node
-        self.network = network
+class Kad_Client:
+    ''' The Kad_Client class is responsible for performing primary kad
+    actions which can involve multiple RPC requests and state which must be
+    maintained across multiple requests '''
+    def __init__(self, pool, rpc_client, rpc_client_chan):
+        self.pool = pool
+        self.rpc_client = rpc_client
+        self.rpc_chan = rpc_client_chan
+        self.node = self.rpc_client.return_node()
 
-        self.pool = eventlet.greenpool.GreenPool(100)
+        # start the rpc client event loop
+        self.pool.spawn(rpc_client.main)
 
-        # we must comminicate with the rpc client via this queue
-        # which operates as a channel.
-        self.rpc_client_queue = eventlet.queue.Queue()
-        self.rpc_client = RPCClient(self.network, self.rpc_client_queue,
-            self.node, self.alpha)
+    def create_message(self, m_type, chan = None):
 
-        # unique id's that the rpc client can use to handle
-        # requests
-        self.action_id = 0
+        if not chan:
+            chan = Queue()
 
-    def create_message(self, m_type):
-        self.action_id = self.action_id + 1
-        return {
+        m = {
             'type' : m_type,
             'data' : {},
-            'id'   : self.action_id
+            'chan' : chan
         }
+        return m, chan
 
-    def send_internal_message(self, message):
-        m = {
-            'type' : 'internal',
-            'data' : message
-        }
-        self.rpc_client_queue.put(m)
+    def blocking_send_message(self, message):
+        m = { 'type' : 'int', 'data' : message }
+        self.rpc_chan.put(m)
+        return message['chan'].get(block=True)
+
+    def send_message(self, message):
+        m = { 'type' : 'int', 'data' : message }
+        self.rpc_chan.put(m)
 
     def join_network(self, nodes):
-        ''' join_network consists of several steps:
-        1. Insert the known nodes into the routing tree
-        2. Perform a 'FIND_NODE' looking for our own node.id
-        3. Once (2) has finished we must refresh all kbuckets in the routing
-           tree'''
-        self._join_network(nodes)
+        self.pool.spawn(self._join_network, nodes)
 
     def _join_network(self, nodes):
-        queue = eventlet.queue.Queue()
-        m = self.create_message('ADD_NODES')
-        m['data']['queue'] = queue
-        m['data']['nodes'] = nodes
-        self.send_internal_message(m)
+        ''' _join_network is a blocking method call that joins a kad node
+        to the network.
+        '''
 
-        # now we block and wait for a message back to the queue
-        response = queue.get(block=True)
-        print response
+        # 1. add nodes to the network
+        m, chan = self.create_message('ADD_NODE')
+        m['data'] = nodes
+        self.blocking_send_message(m)
 
-        m.self.create_message('FIND_NODE')
-        m['data']['queue'] = queue
-        m['data']['node']  = self.node
-        self.send_internal_message(m)
-        response = queue.get(block=True)
-        print response
+        # 2. perform a find node on ourselves
+        self._node_lookup(self.node)
 
-        m.self.create_message('REFRESH_BUCKETS')
-        self.send_internal_message(m)
+        # 3. force refresh buckets
+        '''
+        m, chan = self.create_message('REFRESH_BUCKETS')
+        self.blocking_send_message(m)
+        '''
 
     def store_value(self, key, value):
-        ''' store
-        '''
+        pass
 
-    def find_node(self, node):
-        ''' blah
-        '''
+    def fetch_value(self, key):
+        pass
 
-    def node_lookup(self, node):
-        ''' node_lookup locates the k (20 in the kad paper) nearest nodes
-        to a given node. This is a recursive algorithm that stops when
-        '''
+    def _node_lookup(self, node):
+        ''' _node_lookup is a blocking call that finds k closest nodes
+        to a given node '''
+
+        # 1. fetch k closest nodes from our routing table
+        m, chan = self.create_message('FIND_CLOSEST_NODES')
+        m['data'] = node
+        nodes = self.blocking_send_message(m)
+
+        # 2. perform 'SEND_FIND_NODE' against alpha of them
+        if nodes:
+            m, chan = self.create_message('SEND_FIND_NODE')
+            m['data']['req_node'] = self.node
+            m['data']['node'] = nodes[0]
+            self.send_message(m)
+            response = chan.get(block=True)
 
 
-class RPCClient:
-    def __init__(self, network, queue, node=None, alpha = 3):
-        self.alpha = alpha  # concurrent network queries
-        self.queue = eventlet.queue.Queue()
-        self.network = network
+class Rpc_Client:
+    ''' The Rpc_Client layer is responsible for communicating with other nodes
+    on the network, responding to their RPC requests and starting new RPC
+    requests on behalf of the Kad_Client class '''
+    def __init__(self, network, client_chan, node=None, alpha = 3):
+        self.alpha = alpha       # concurrent network queries
+        self.chan = client_chan  # channel for internal & network rpcs
+        self.network = network   # interface to our network (nonblocking sends)
 
         if node == None:
             node = Node(None, None, None)
 
-        self.addr, self.port = self.network.connect(self.queue, node.addr, node.port)
+        self.addr, self.port = self.network.connect(self.chan, node.addr, node.port)
+        node.addr = self.addr
+        node.port = self.port
 
         if node.id is None:
             node.id = random.randint(0,2**160)
@@ -101,36 +112,53 @@ class RPCClient:
 
         self.routing = RoutingTree(self.node)
 
-        self.network_actions = {
-            'PING'         : self.handle_ping,
-            'PONG'         : self.handle_pong,
-            'STORE'        : self.handle_store,
-            'FIND_VALUE'   : self.handle_find_value,
-            'FIND_NODE'    : self.handle_find_node,
-            'RETURN_NODE'  : self.handle_return_node,
-            'RETURN_VALUE' : self.handle_return_value
+        self.rpc_actions = {
+            'PING'         : self.rpc_handle_ping,
+            'PONG'         : self.rpc_handle_pong,
+            'STORE'        : self.rpc_handle_store,
+            'FIND_VALUE'   : self.rpc_handle_find_value,
+            'FIND_NODE'    : self.rpc_handle_find_node,
+            'RETURN_NODE'  : self.rpc_handle_return_node,
+            'RETURN_VALUE' : self.rpc_handle_return_value
         }
 
         self.internal_actions = {
-            'JOIN'     : self.handle_internal,
-            'STORE'    : self.handle_internal,
-            'FETCH'    : self.handle_internal,
-            'ADD_NODE' : self.handle_internal,
-            'FETCH_NODES' : self.handle_internal
+            'ADD_NODE'           : self.int_add_node,
+            'FIND_CLOSEST_NODES' : self.int_find_closest_nodes,
+            'SEND_FIND_NODE'     : self.int_send_find_node
         }
 
         self.data_store = simple()
-        self.xids = {}
+        self.rpc_xids = {}
         self.timers = {}
         self.debug = True
-
-    def handle_internal(self):
-        ''' NOT TO BE IMPLEMENTED '''
-        pass
 
     def log(self, message):
         if self.debug:
             print "%s: %s" % (self.node, message)
+
+    def int_add_node(self, message):
+        if 'data' in message:
+            if type(message['data']) == list:
+                for node in message['data']:
+                    self.routing.addNode(node)
+            else:
+                self.routing.addNode(message['data'])
+            message['chan'].put(True)
+        else:
+            message['chan'].put(False)
+
+    def int_find_closest_nodes(self, message):
+        if 'data' in message:
+            nodes = self.routing.findClosestNodes(message['data'])
+            message['chan'].put(nodes)
+        else:
+            message['chan'].put([])
+
+    def int_send_find_node(self, message):
+        if 'data' in message:
+            d = message['data']
+            self.rpc_perform_find_node(d['node'], d['req_node'], message['chan'])
 
     def check_timer(self, name, wait):
         if name in self.timers:
@@ -147,13 +175,21 @@ class RPCClient:
     def return_node(self):
         return Node(self.node.addr, self.node.port, self.node.id)
 
-    def create_message(self, msg_type, xid=None):
-        ''' create_message creates a message to be sent to another node.
+    def rpc_add_transaction(self, xid, m_type, dest_node, chan = None):
+        self.rpc_xids[xid] = {
+            'dest' : dest_node,
+            'type' : m_type,
+            'sent' : time.time(),
+            'chan' : chan
+        }
+
+    def rpc_create_message(self, msg_type, xid=None):
+        ''' rpc_create_message creates a message to be sent to another node.
         If a transaction id is not specified then one is created.
         '''
         if not xid:
             xid = random.randint(0,2**160)
-            while xid in self.xids:
+            while xid in self.rpc_xids:
                 xid = random.randint(0,2**160)
 
         return {
@@ -163,114 +199,109 @@ class RPCClient:
             'data'  : {}
         }
 
-    def add_transaction(self, xid, m_type, dest_node):
-        self.xids[xid] = {
-            'dest' : dest_node,
-            'type' : m_type,
-            'sent' : time.time()
+    def rpc_perform_find_node(self, node, req_node, chan):
+        ''' rpc_find_node sends a 'FIND_NODE' query to 'node' against
+        the 'req_node' node '''
+        m = self.rpc_create_message('FIND_NODE')
+        m['data'] = req_node.id
+        self.rpc_add_transaction(m['xid'], 'FIND_NODE', node, chan)
+        self.rpc_send_message(node.addr, node.port, m)
+        self.routing.performedLookup(node)
+
+    def rpc_perform_find_value(self, node, key, chan):
+        ''' rpc_find_value sends a 'FIND_VALUE' rpc to the requested
+        node for the requested key '''
+        key_hash = long(hashlib.sha1(key).digest())
+        m = self.rpc_create_message('FIND_VALUE')
+        m['data'] = {
+            'key': key,
+            'hash': key_hash
         }
 
-    def load_initial_nodes(self):
-        ''' TODO: this need to be changed - as the find node needs to be
-        followed up with a bucket refresh after a response has been
-        recieved '''
-        for node in self.initial_nodes:
-            self.log("adding initial node %s" % node)
-            self.routing.addNode(node)
-        self.perform_find_node(self.node)
+        self.add_transaction(m['xid'], 'FIND_VALUE', node, chan)
+        self.rpc_send_message(node.addr, node.port, m)
+        self.routing.performedLookup(node)
 
-    def perform_find_node(self, node):
-        ''' perform_find_node starts a FIND_NODE query
-        '''
-        self.log('perform_find_node against %s' % node.id)
-        nodes = self.routing.findClosestNodes(node)
-        for dst_node in nodes[:self.alpha]:
-            m = self.create_message('FIND_NODE')
-            m['data'] = node.id
-            self.add_transaction(m['xid'], 'FIND_NODE', dst_node)
-            self.send_message(dst_node.addr, dst_node.port, m)
-            self.routing.performedLookup(dst_node)
-
-    def perform_find_value(self, key):
-        ''' perform a 'FIND_VALUE' request for the given (string) key '''
-        key_hash = long(hashlib.sha1(key).digest())
-        destination = Node(None, None, key_hash)
-        nodes = self.routing.findClosestNodes(destination)
-        for dst_node in nodes[:self.alpha]:
-            m = self.create_message('FIND_VALUE')
-            m['data'] = {
-                'key': key,
-                'hash': key_hash
-            }
-            self.add_transaction(m['xid'], 'FIND_VALUE', dst_node)
-            self.send_message(dst_node.addr, dst_node.port, m)
-            self.routing.performedLookup(dst_node)
-
-    def perform_ping(self, node):
-        ''' perform a 'PING' request to the given node '''
-        m = self.create_message('PING')
-        self.send_message(node.addr, node.port, m)
+    def rpc_perform_ping(self, node, chan):
+        ''' rpc_perform_ping sends 'PING' request to the given node '''
+        m = self.rpc_create_message('PING')
+        self.send_rpc_message(node.addr, node.port, m, chan)
         self.add_transaction(m['xid'], 'PING', node)
 
-    def perform_store(self, key, value):
-        ''' find_node should be called before this, we need
-        to keep searching until we stop finding nodes closer
-        to the desired key '''
+    def rpc_perform_store(self, node, key, value):
+        ''' rpc_perform_store sends a 'STORE' rpc to the
+        requested node '''
 
         key_hash = long(hashlib.sha1(key).digest())
-        destination = Node(None, None, key_hash)
-        nodes = self.routing.findClosestNodes(destination)
-        for dst_node in nodes:
-            m = self.create_message('STORE')
-            m['data'] = {
-                'key': key,
-                'hash': key_hash,
-                'value': value
-            }
-            self.send_message(dst_node.addr, dst_node.port, m)
 
-    def handle_find_node(self, message):
-        ''' handle_find_node looks for a node_id in the 'data
+        m = self.rpc_create_message('STORE')
+        m['data'] = {
+            'key': key,
+            'hash': key_hash,
+            'value': value
+        }
+        self.rpc_send_message(node.addr, node.port, m)
+
+    def rpc_handle_find_node(self, message):
+        ''' rpc_handle_find_node looks for a node_id in the 'data
         portion of the message. The client then returns upto k
         nodes from our routing tree which are closest to the
         requested node.
         '''
-        self.log('handle_find_node')
         source = message['source']
         node_to_find = Node(None, None, message['data'])
         nodes = self.routing.findClosestNodes(node_to_find)
-        m = self.create_message('RETURN_NODE', message['xid'])
+        m = self.rpc_create_message('RETURN_NODE', message['xid'])
         m['data'] = [(n.addr, n.port, n.id) for n in nodes]
-        self.send_message(source.addr, source.port, m)
+        self.rpc_send_message(source.addr, source.port, m)
 
-    def handle_return_node(self, message):
-        self.log('handle_return_node %s' % message['xid'])
-        if 'xid' in message and message['xid'] in self.xids:
+    def rpc_handle_return_node(self, message):
+        ''' rpc_handle_return_node handles a 'RETURN_NODE' message,
+        add all returned nodes to the routing tree
+        if there is a channel associated with this request then
+        send the node list back
+        '''
+        if 'xid' in message and message['xid'] in self.rpc_xids:
+            nodes = []
+
             for node in message['data']:
                 n = Node(node[0], node[1], node[2])
                 self.routing.addNode(n)
-            del self.xids[message['xid']]
+                nodes.append(n)
 
-    def handle_ping(self, message):
+            if self.rpc_xids[message['xid']]['chan']:
+                self.rpc_xids[message['xid']]['chan'].put(nodes)
+
+            del self.rpc_xids[message['xid']]
+
+    def rpc_handle_ping(self, message):
+        ''' rpc_handle_ping handles the rpc 'PING' message '''
         source = message['source']
-        m = self.create_message('PONG', message['xid'])
-        self.send_message(source.addr, source.port, m)
+        m = self.rpc_create_message('PONG', message['xid'])
+        self.rpc_send_message(source.addr, source.port, m)
 
-    def handle_pong(self, message):
-        ''' the routing tree will have already been informed that
-        we have seen this node, so just delete it from the transaction
-        table '''
-        if 'xid' in message and message['xid'] in self.xids:
-            del self.xids[message['xid']]
+    def rpc_handle_pong(self, message):
+        ''' rpc_handle_pong handles the rpc 'PONG' message '''
+        if 'xid' in message and message['xid'] in self.rpc_xids:
+            if self.rpc_xids[message['xid']]['chan']:
+                self.rpc_xids[message['xid']]['chan'].put(True)
 
-    def handle_store(self, message):
-        ''' store key/value pair in the data store '''
+            del self.rpc_xids[message['xid']]
+
+    def rpc_handle_store(self, message):
+        ''' rpc_handle_store handles the rpc 'STORE' which is to
+        store the requested key/value in our datastore '''
         required = ['key', 'key_hash', 'value']
         data = message['data']
         if all(k in data for k in required):
             self.data_store.store(k['key'], k['key_hash'], k['value'])
 
-    def handle_find_value(self, message):
+    def rpc_handle_find_value(self, message):
+        ''' rpc_handle_find_value handles the rpc 'FIND_VALUE' message
+        it either returns the value, if it is stored at this node or
+        returns the closest k nodes to the requested key from our
+        routing tree
+        '''
         key_hash = message['data']['key_hash']
         source = message['source']
         value = self.data_store.retrieve_value(key_hash)
@@ -280,35 +311,44 @@ class RPCClient:
             node_to_find = Node(None, None, key_hash)
             nodes = self.routing.findClosestNodes(node_to_find)
             nodes = [(n.addr, n.port, n.id) for n in nodes]
-            response = { 'value' : nodes, 'found' : True }
+            response = { 'value' : nodes, 'found' : False }
 
-        m = self.create_message('RETURN_VALUE', message['xid'])
+        m = self.rpc_create_message('RETURN_VALUE', message['xid'])
         m['data'] = response
-        self.send_message(source.addr, source.port, m)
+        self.rpc_send_message(source.addr, source.port, m)
 
-    def handle_return_value(self, message):
-        ''' this needs to be coordinatied with other queries '''
-        pass
+    def rpc_handle_return_value(self, message):
+        if 'xid' in message and message['xid'] in self.rpc_xids:
+            if self.rpc_xids[message['xid']]['chan']:
+                self.rpc_xids[message['xid']]['chan'].put(message['data'])
+            del self.rpc_xids[message['xid']]
 
-    def process_internal_message(self, m):
-        ''' handle messages from ourselves '''
-        pass
-
-    def process_public_message(self, m):
-        if 'type' in m and m['type'] in self.network_actions:
+    def rpc_handle_message(self, m):
+        ''' rpc_handle_message is the initial handler for all rpc messages
+        the correct method will be called based on the message type
+        '''
+        if 'type' in m and m['type'] in self.rpc_actions:
             # add node into our routing tree
             node = Node(m['source'][0], m['source'][1], m['source'][2])
             self.routing.addNode(node)
             m['source'] = node
 
             # handle message
-            self.actions[m['type']](m)
+            self.rpc_actions[m['type']](m)
         else:
             self.log("process_message malformed message: %s" % m)
 
-    def send_message(self, addr, port, message):
-        self.log('send_message => %s:%s' % (addr, port))
+    def rpc_send_message(self, addr, port, message):
+        ''' rpc_send_message sends an rpc message onto the network '''
+        self.log('send_rpc_message => %s:%s' % (addr, port))
         self.network.send(addr, port, message)
+
+    def int_handle_message(self, m):
+        ''' handle messages from ourselves '''
+        if 'type' in m and m['type'] in self.internal_actions:
+            self.internal_actions[m['type']](m)
+        else:
+            self.log("process_internal_message: malformed: %s" % m)
 
     def refresh_buckets(self, force=False):
         nodes  = self.routing.fetchRefreshNodes(force)
@@ -336,20 +376,24 @@ class RPCClient:
 
     def main(self, wait = None):
         if wait is not None:
-            eventlet.sleep(wait)
-        self.load_initial_nodes()
+            gevent.sleep(wait)
 
         while True:
             try:
-                message = self.queue.get(block=True, timeout=5)
-                if 'type' in message and message['type'] == 'public':
-                    self.process_network_message(message)
-                elif 'type' in message and message['type'] == 'internal':
-                    self.process_internal_message(message)
-
-            except: pass
+                message = self.chan.get(block=True, timeout=5)
+                if 'type' in message and message['type'] == 'rpc':
+                    self.rpc_handle_message(message['data'])
+                elif 'type' in message and message['type'] == 'int':
+                    self.int_handle_message(message['data'])
+                else:
+                    self.log('unhandled message: %s' % message)
+            except Empty: pass
+            except:
+                self.log('Client exception')
+                if self.debug:
+                    traceback.print_exc()
 
             self.run_events()
 
             # allow other threads the chance to run
-            eventlet.sleep()
+            gevent.sleep()

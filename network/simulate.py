@@ -1,5 +1,3 @@
-import eventlet
-
 import random
 import socket
 import struct
@@ -27,7 +25,7 @@ class Simulate:
         isn't connected to the network
         '''
         if (addr, port) in self.queues:
-            m = { 'type' : 'network', 'data' : message }
+            m = { 'type' : 'rpc', 'data' : message }
             self.queues[(addr, port)].put(m, block=False)
             self.log("%s => %s:%s" % (m, addr, port))
         else:
