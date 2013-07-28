@@ -5,7 +5,7 @@ import random
 import time
 import hashlib
 
-import eventlet
+import gevent
 
 class Client:
     def __init__(self, network, addr=None, port=None, node_id=None, nodes = []):
@@ -235,7 +235,7 @@ class Client:
 
     def main(self, wait = None):
         if wait is not None:
-            eventlet.sleep(wait)
+            gevent.sleep(wait)
         self.load_initial_nodes()
 
         while True:
@@ -247,4 +247,4 @@ class Client:
             self.run_events()
 
             # allow other threads the chance to run
-            eventlet.sleep()
+            gevent.sleep()

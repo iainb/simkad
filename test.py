@@ -1,9 +1,9 @@
-from eventlet import greenpool
-import eventlet
 from client import Client
 from network.simulate import Simulate
 
 import random
+
+from gevent.pool import Pool
 
 def spawn_clients(pool, network, n):
     last = spawn_client(pool, network)
@@ -21,7 +21,7 @@ def spawn_client(pool, network, initial_node=None):
     return c.return_node()
 
 
-pool = greenpool.GreenPool(6000)
+pool = Pool(size=6000)
 network = Simulate(False)
 pool.spawn(spawn_clients, pool, network, 10)
-pool.waitall()
+pool.join()

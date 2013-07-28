@@ -1,7 +1,8 @@
-from eventlet import queue
 import random
 import socket
 import struct
+
+from gevent import queue
 
 class Simulate:
     ''' Simulate is a network interface to a simulated ip network
