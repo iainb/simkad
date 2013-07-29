@@ -27,22 +27,26 @@ class Simulate:
         isn't connected to the network
         '''
         if (addr, port) in self.queues:
-            self.queues[(addr, port)].put(message, block=False)
-            self.log("%s => %s:%s" % (message, addr, port))
+            m = { 'type' : 'rpc', 'data' : message }
+            self.queues[(addr, port)].put(m, block=False)
+            self.log("%s => %s:%s" % (m, addr, port))
         else:
             self.log("%s:%s not on the network" % (addr, port))
 
 
-    def connect(self, addr = None, port = None):
+    def connect(self, queue, addr = None, port = None):
         ''' connect to simulated network, if addr
         or port are specified then assign them randomly
 
-        return addr, port and queue to read from for incoming messages
+        queue is the queue which the client expects network messages
+        to be delivered to it on.
+
+        return addr, port
         '''
         addr, port = self._assign_address(addr, port)
-        self.queues[(addr, port)] = queue.Queue()
+        self.queues[(addr, port)] = queue
         self.log("%s:%s joined the network" % (addr, port))
-        return addr, port, self.queues[(addr, port)]
+        return addr, port
 
     def disconnect(self, addr, port, queue):
         ''' disconnect removes a connection from the pool.

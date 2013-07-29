@@ -1,7 +1,8 @@
-from client import Client
+from client import Rpc_Client, Kad_Client
 from network.simulate import Simulate
 
-import random
+
+from gevent import pool, queue
 
 from gevent.pool import Pool
 
@@ -16,12 +17,15 @@ def spawn_client(pool, network, initial_node=None):
         nodes = []
     else:
         nodes = [initial_node]
-    c = Client(network, nodes=nodes)
-    pool.spawn(c.main, random.randint(1,10))
-    return c.return_node()
 
+    rpc_chan  = queue.Queue()
+    rpc_client = Rpc_Client(network, rpc_chan)
+    node = rpc_client.return_node()
+    kad_client = Kad_Client(pool, rpc_client, rpc_chan)
+    kad_client.join_network(nodes)
+    return node
 
-pool = Pool(size=6000)
+p = pool.Pool(6000)
 network = Simulate(False)
-pool.spawn(spawn_clients, pool, network, 10)
-pool.join()
+p.spawn(spawn_clients, p, network, 2)
+p.join()
