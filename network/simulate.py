@@ -1,8 +1,7 @@
 import random
 import socket
 import struct
-
-from gevent import queue
+import json
 
 class Simulate:
     ''' Simulate is a network interface to a simulated ip network
@@ -28,6 +27,7 @@ class Simulate:
         '''
         if (addr, port) in self.queues:
             m = { 'type' : 'rpc', 'data' : message }
+            m = json.loads(json.dumps(m))
             self.queues[(addr, port)].put(m, block=False)
             self.log("%s => %s:%s" % (m, addr, port))
         else:
