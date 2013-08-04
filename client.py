@@ -68,12 +68,9 @@ class Kad_Client:
         self._node_lookup(self.node)
 
         # 3. force refresh buckets
-        self.log('network joined')
-
-        '''
         m, chan = self.create_message('REFRESH_BUCKETS')
         self.blocking_send_message(m)
-        '''
+        self.log('_join_network complete')
 
     def store_value(self, key, value):
         pass
@@ -193,7 +190,8 @@ class Rpc_Client:
         self.internal_actions = {
             'ADD_NODE'           : self.int_add_node,
             'FIND_CLOSEST_NODES' : self.int_find_closest_nodes,
-            'SEND_FIND_NODE'     : self.int_send_find_node
+            'SEND_FIND_NODE'     : self.int_send_find_node,
+            'REFRESH_BUCKETS'    : self.int_refresh_buckets
         }
 
         self.data_store = simple()
@@ -227,6 +225,12 @@ class Rpc_Client:
         if 'data' in message:
             d = message['data']
             self.rpc_perform_find_node(d['node'], d['req_node'], message['chan'])
+
+    def int_refresh_buckets(self, message):
+        self.perform_refresh_buckets(True)
+
+        if 'chan' in message:
+            message['chan'].put(True)
 
     def check_timer(self, name, wait):
         if name in self.timers:
@@ -336,7 +340,6 @@ class Rpc_Client:
         send the node list back
         '''
         if 'xid' in message and message['xid'] in self.rpc_xids:
-                # NOTE: if there is a chan to respond on we should always
             nodes = []
 
             for node in message['data']:
@@ -426,9 +429,12 @@ class Rpc_Client:
         else:
             self.log("process_internal_message: malformed: %s" % m)
 
-    def refresh_buckets(self, force=False):
-        # TODO implement me
-        pass
+    def perform_refresh_buckets(self, force=False):
+        ''' refresh buckets performs a find_node rpc against
+        a node from each bucket which requires a refresh '''
+        nodes = self.routing.fetchRefreshNodes(force)
+        for node in nodes:
+            self.rpc_perform_find_node(self.node, node, None)
 
     def run_events(self):
         ''' run_events checks for any events which need to be run
@@ -438,11 +444,9 @@ class Rpc_Client:
         * refreshing buckets
         '''
 
-        return
-
         # refresh any buckets which need refreshing
         if self.check_timer('refresh_buckets', 60):
-            self.refresh_buckets()
+            self.perform_refresh_buckets()
 
         # debug info - delete this
         if self.check_timer('debug', 5):
