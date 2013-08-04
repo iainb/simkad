@@ -73,7 +73,25 @@ class Kad_Client:
         self.log('_join_network complete')
 
     def store_value(self, key, value):
-        pass
+        self.pool.spawn(self._store_value, key, value)
+
+    def _store_value(self, key, value):
+        ''' _store_value is a blocking method call that stores
+        a value under a key within the kad network
+
+        nodes do not respond with an ack saying they
+
+        '''
+
+        key_hash = long(hashlib.sha1(key).hexdigest(), 16)
+        nodes = self._node_lookup(Node(None, None, key_hash))
+        for node in nodes:
+            m, chan = self.create_message('STORE_VALUE')
+            m['data']['key'] = key
+            m['data']['key_hash'] = key_hash
+            m['data']['value'] = value
+            m['data']['node'] = node
+            self.send_message(m)
 
     def fetch_value(self, key):
         pass
@@ -191,7 +209,8 @@ class Rpc_Client:
             'ADD_NODE'           : self.int_add_node,
             'FIND_CLOSEST_NODES' : self.int_find_closest_nodes,
             'SEND_FIND_NODE'     : self.int_send_find_node,
-            'REFRESH_BUCKETS'    : self.int_refresh_buckets
+            'REFRESH_BUCKETS'    : self.int_refresh_buckets,
+            'STORE_VALUE'        : self.int_store_value
         }
 
         self.data_store = simple()
@@ -231,6 +250,11 @@ class Rpc_Client:
 
         if 'chan' in message:
             message['chan'].put(True)
+
+    def int_store_value(self, message):
+        self.rpc_perform_store(message['data']['node'],
+                               message['data']['key'],
+                               message['data']['value'])
 
     def check_timer(self, name, wait):
         if name in self.timers:
@@ -289,7 +313,7 @@ class Rpc_Client:
     def rpc_perform_find_value(self, node, key, chan):
         ''' rpc_find_value sends a 'FIND_VALUE' rpc to the requested
         node for the requested key '''
-        key_hash = long(hashlib.sha1(key).digest())
+        key_hash = long(hashlib.sha1(key).hexdigest(), 16)
         m = self.rpc_create_message('FIND_VALUE')
         m['data'] = {
             'key': key,
@@ -310,12 +334,12 @@ class Rpc_Client:
         ''' rpc_perform_store sends a 'STORE' rpc to the
         requested node '''
 
-        key_hash = long(hashlib.sha1(key).digest())
+        key_hash = long(hashlib.sha1(key).hexdigest(), 16)
 
         m = self.rpc_create_message('STORE')
         m['data'] = {
             'key': key,
-            'hash': key_hash,
+            'key_hash': key_hash,
             'value': value
         }
         self.rpc_send_message(node.addr, node.port, m)
@@ -373,7 +397,8 @@ class Rpc_Client:
         required = ['key', 'key_hash', 'value']
         data = message['data']
         if all(k in data for k in required):
-            self.data_store.store(k['key'], k['key_hash'], k['value'])
+            self.log('stored %s => %s' %(data['key'], data['value']))
+            self.data_store.store(data['key'], data['key_hash'], data['value'])
 
     def rpc_handle_find_value(self, message):
         ''' rpc_handle_find_value handles the rpc 'FIND_VALUE' message
@@ -447,6 +472,8 @@ class Rpc_Client:
         # refresh any buckets which need refreshing
         if self.check_timer('refresh_buckets', 60):
             self.perform_refresh_buckets()
+
+        return
 
         # debug info - delete this
         if self.check_timer('debug', 5):
