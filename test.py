@@ -1,7 +1,6 @@
 from client import Rpc_Client, Kad_Client
 from network.simulate import Simulate
 
-
 from gevent import pool, queue
 
 from gevent.pool import Pool
@@ -27,5 +26,5 @@ def spawn_client(pool, network, initial_node=None):
 
 p = pool.Pool(6000)
 network = Simulate(False)
-p.spawn(spawn_clients, p, network, 2)
+p.spawn(spawn_clients, p, network, 100)
 p.join()

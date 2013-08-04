@@ -14,13 +14,21 @@ class Kad_Client:
     actions which can involve multiple RPC requests and state which must be
     maintained across multiple requests '''
     def __init__(self, pool, rpc_client, rpc_client_chan):
+        self.alpha = 3
+        self.k     = 20
         self.pool = pool
         self.rpc_client = rpc_client
         self.rpc_chan = rpc_client_chan
         self.node = self.rpc_client.return_node()
 
+        self.debug = True
+
         # start the rpc client event loop
         self.pool.spawn(rpc_client.main)
+
+    def log(self, message):
+        if self.debug:
+            print "%s: %s" % (self.node, message)
 
     def create_message(self, m_type, chan = None):
 
@@ -60,6 +68,8 @@ class Kad_Client:
         self._node_lookup(self.node)
 
         # 3. force refresh buckets
+        self.log('network joined')
+
         '''
         m, chan = self.create_message('REFRESH_BUCKETS')
         self.blocking_send_message(m)
@@ -74,20 +84,78 @@ class Kad_Client:
     def _node_lookup(self, node):
         ''' _node_lookup is a blocking call that finds k closest nodes
         to a given node '''
+        nodes_all = []
+        nodes_queried = []
+        active_queries = 0
+        total_queries = 0
+        finished = False
+        chan = Queue()
 
-        # 1. fetch k closest nodes from our routing table
+        # load in closest nodes from our own routing table
+        for n in self._fetch_closest_nodes(node):
+            nodes_all.append(n)
+
+        while not finished:
+            # sort the nodes by proximity to the target node
+            nodes_all.sort(lambda a, b, num=node.id: cmp(num ^ a.id, num ^ b.id))
+
+            # if we have recieved responses from the k closest nodes we know
+            # about then finish searching
+            if len(nodes_queried) > self.k:
+                c = 0
+                search_complete = True
+                for n in nodes_all[:self.k]:
+                    c += 1
+                    if n not in nodes_queried:
+                        search_complete = False
+                        break
+
+                if search_complete:
+                    finished = True
+                    break
+
+            # send queries
+            while active_queries < self.alpha:
+                sent_query = False
+                for n in nodes_all:
+                    if n not in nodes_queried:
+                        # send query
+                        m, chan = self.create_message('SEND_FIND_NODE', chan)
+                        m['data']['req_node'] = self.node
+                        m['data']['node']     = n
+                        active_queries += 1
+                        total_queries += 1
+                        nodes_queried.append(n)
+                        sent_query = True
+                        self.send_message(m)
+                        break
+
+                if not sent_query:
+                    # we've sent messages to all known nodes
+                    break
+
+            # wait for response, if the response contains unseen nodes
+            # then add them to our list of nodes
+            if active_queries > 0:
+                m = chan.get()
+                active_queries -= 1
+                if 'nodes' in m:
+                    for n in m['nodes']:
+                        if n not in nodes_all:
+                            nodes_all.append(n)
+            else:
+                # no more nodes to query
+                finished = True
+
+        # sort and return k nodes
+        nodes_all.sort(lambda a, b, num=node.id: cmp(num ^ a.id, num ^ b.id))
+        return nodes_all[:self.k]
+
+
+    def _fetch_closest_nodes(self, node):
         m, chan = self.create_message('FIND_CLOSEST_NODES')
         m['data'] = node
-        nodes = self.blocking_send_message(m)
-
-        # 2. perform 'SEND_FIND_NODE' against alpha of them
-        if nodes:
-            m, chan = self.create_message('SEND_FIND_NODE')
-            m['data']['req_node'] = self.node
-            m['data']['node'] = nodes[0]
-            self.send_message(m)
-            response = chan.get(block=True)
-
+        return self.blocking_send_message(m)
 
 class Rpc_Client:
     ''' The Rpc_Client layer is responsible for communicating with other nodes
@@ -106,7 +174,7 @@ class Rpc_Client:
         node.port = self.port
 
         if node.id is None:
-            node.id = random.randint(0,2**160)
+            node.id = random.randint(1,2**160)
 
         self.node    = node
 
@@ -175,12 +243,18 @@ class Rpc_Client:
     def return_node(self):
         return Node(self.node.addr, self.node.port, self.node.id)
 
-    def rpc_add_transaction(self, xid, m_type, dest_node, chan = None):
+    def rpc_add_transaction(self, xid, m_type, dest_node, chan = None, timeout = None):
+
+        if timeout is None:
+            #  TODO: config default timeout? or maybe timeout is required.
+            timeout = 2
+
         self.rpc_xids[xid] = {
-            'dest' : dest_node,
-            'type' : m_type,
-            'sent' : time.time(),
-            'chan' : chan
+            'dest'    : dest_node,
+            'type'    : m_type,
+            'sent'    : time.time(),
+            'chan'    : chan,
+            'timeout' : timeout
         }
 
     def rpc_create_message(self, msg_type, xid=None):
@@ -204,7 +278,7 @@ class Rpc_Client:
         the 'req_node' node '''
         m = self.rpc_create_message('FIND_NODE')
         m['data'] = req_node.id
-        self.rpc_add_transaction(m['xid'], 'FIND_NODE', node, chan)
+        self.rpc_add_transaction(m['xid'], 'FIND_NODE', node, chan, None)
         self.rpc_send_message(node.addr, node.port, m)
         self.routing.performedLookup(node)
 
@@ -262,6 +336,7 @@ class Rpc_Client:
         send the node list back
         '''
         if 'xid' in message and message['xid'] in self.rpc_xids:
+                # NOTE: if there is a chan to respond on we should always
             nodes = []
 
             for node in message['data']:
@@ -270,7 +345,8 @@ class Rpc_Client:
                 nodes.append(n)
 
             if self.rpc_xids[message['xid']]['chan']:
-                self.rpc_xids[message['xid']]['chan'].put(nodes)
+                m = { 'timeout' : False, 'nodes' : nodes }
+                self.rpc_xids[message['xid']]['chan'].put(m)
 
             del self.rpc_xids[message['xid']]
 
@@ -340,7 +416,7 @@ class Rpc_Client:
 
     def rpc_send_message(self, addr, port, message):
         ''' rpc_send_message sends an rpc message onto the network '''
-        self.log('send_rpc_message => %s:%s' % (addr, port))
+        #self.log('send_rpc_message => %s:%s %s' % (addr, port, message['type']))
         self.network.send(addr, port, message)
 
     def int_handle_message(self, m):
@@ -351,9 +427,8 @@ class Rpc_Client:
             self.log("process_internal_message: malformed: %s" % m)
 
     def refresh_buckets(self, force=False):
-        nodes  = self.routing.fetchRefreshNodes(force)
-        for node in nodes:
-            self.perform_find_node(node)
+        # TODO implement me
+        pass
 
     def run_events(self):
         ''' run_events checks for any events which need to be run
@@ -362,6 +437,8 @@ class Rpc_Client:
         * timing out rpc requests
         * refreshing buckets
         '''
+
+        return
 
         # refresh any buckets which need refreshing
         if self.check_timer('refresh_buckets', 60):
