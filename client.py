@@ -94,9 +94,17 @@ class Kad_Client:
             self.send_message(m)
 
     def fetch_value(self, key):
-        pass
+        self.pool.spawn(self._node_lookup, key)
 
-    def _node_lookup(self, node):
+    def _fetch_value(self, key):
+        ''' _fetch_value is a blocking method call that returns
+        a value from the kad network or None if key is not found '''
+        key_hash = long(hashlib.sha1(key).hexdigest(), 16)
+        node = Node(None, None, key_hash)
+        return self._node_lookup(node, key)
+
+
+    def _node_lookup(self, node, key = None):
         ''' _node_lookup is a blocking call that finds k closest nodes
         to a given node '''
         nodes_all = []
@@ -105,6 +113,11 @@ class Kad_Client:
         total_queries = 0
         finished = False
         chan = Queue()
+
+        if key == None:
+            message_type = 'SEND_FIND_NODE'
+        else:
+            message_type = 'SEND_FIND_VALUE'
 
         # load in closest nodes from our own routing table
         for n in self._fetch_closest_nodes(node):
@@ -135,9 +148,10 @@ class Kad_Client:
                 for n in nodes_all:
                     if n not in nodes_queried:
                         # send query
-                        m, chan = self.create_message('SEND_FIND_NODE', chan)
+                        m, chan = self.create_message(message_type, chan)
                         m['data']['req_node'] = self.node
                         m['data']['node']     = n
+                        m['data']['key']      = key
                         active_queries += 1
                         total_queries += 1
                         nodes_queried.append(n)
@@ -154,6 +168,8 @@ class Kad_Client:
             if active_queries > 0:
                 m = chan.get()
                 active_queries -= 1
+                if 'value' in m and key != None:
+                    return m['value']
                 if 'nodes' in m:
                     for n in m['nodes']:
                         if n not in nodes_all:
@@ -163,8 +179,11 @@ class Kad_Client:
                 finished = True
 
         # sort and return k nodes
-        nodes_all.sort(lambda a, b, num=node.id: cmp(num ^ a.id, num ^ b.id))
-        return nodes_all[:self.k]
+        if key == None:
+            nodes_all.sort(lambda a, b, num=node.id: cmp(num ^ a.id, num ^ b.id))
+            return nodes_all[:self.k]
+        else:
+            return None
 
 
     def _fetch_closest_nodes(self, node):
@@ -210,7 +229,8 @@ class Rpc_Client:
             'FIND_CLOSEST_NODES' : self.int_find_closest_nodes,
             'SEND_FIND_NODE'     : self.int_send_find_node,
             'REFRESH_BUCKETS'    : self.int_refresh_buckets,
-            'STORE_VALUE'        : self.int_store_value
+            'STORE_VALUE'        : self.int_store_value,
+            'SEND_FIND_VALUE'    : self.int_send_find_value
         }
 
         self.data_store = simple()
@@ -255,6 +275,11 @@ class Rpc_Client:
         self.rpc_perform_store(message['data']['node'],
                                message['data']['key'],
                                message['data']['value'])
+
+    def int_send_find_value(self, message):
+        if 'data' in message:
+            d = message['data']
+            self.rpc_perform_find_value(d['node'], d['key'], message['chan'])
 
     def check_timer(self, name, wait):
         if name in self.timers:
@@ -317,10 +342,10 @@ class Rpc_Client:
         m = self.rpc_create_message('FIND_VALUE')
         m['data'] = {
             'key': key,
-            'hash': key_hash
+            'key_hash': key_hash
         }
 
-        self.add_transaction(m['xid'], 'FIND_VALUE', node, chan)
+        self.rpc_add_transaction(m['xid'], 'FIND_VALUE', node, chan)
         self.rpc_send_message(node.addr, node.port, m)
         self.routing.performedLookup(node)
 
@@ -408,14 +433,14 @@ class Rpc_Client:
         '''
         key_hash = message['data']['key_hash']
         source = message['source']
-        value = self.data_store.retrieve_value(key_hash)
+        value = self.data_store.retrieve(key_hash)
         if value is not None:
             response = { 'value' : value, 'found' : True }
         else:
             node_to_find = Node(None, None, key_hash)
             nodes = self.routing.findClosestNodes(node_to_find)
             nodes = [(n.addr, n.port, n.id) for n in nodes]
-            response = { 'value' : nodes, 'found' : False }
+            response = { 'nodes' : nodes, 'found' : False }
 
         m = self.rpc_create_message('RETURN_VALUE', message['xid'])
         m['data'] = response
@@ -472,8 +497,6 @@ class Rpc_Client:
         # refresh any buckets which need refreshing
         if self.check_timer('refresh_buckets', 60):
             self.perform_refresh_buckets()
-
-        return
 
         # debug info - delete this
         if self.check_timer('debug', 5):
