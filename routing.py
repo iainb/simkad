@@ -52,7 +52,7 @@ class Node:
         return self.id >= a
 
     def __str__(self):
-        return "Node %s:%s (%s)" % (self.addr, self.port, self.id)
+        return "Node %s:%s" % (self.addr, self.port)
 
 class KbucketFull(Exception):
     ''' KbucketFull is raised when a Kbucket is full '''
@@ -124,6 +124,7 @@ class Kbucket:
         return self.nodes[idx]
 
     def getRandomNode(self):
+        ''' getRandomNode retuns a random node from the bucket '''
         return random.choice(self.nodes)
 
     def getNodes(self, count=None):
@@ -143,6 +144,17 @@ class Kbucket:
             return self.nodes[0]
         else:
             return None
+
+    def getDepth(self):
+        _max = "{0:0160b}".format(self.range_min)
+        _min = "{0:0160b}".format(self.range_max)
+        depth = 0
+        for i in xrange(0,31):
+            if _max[i] != _min[i]:
+                return depth
+            depth += 1
+
+        return depth
 
     def removeContact(self, node):
         self.nodes.remove(node)
@@ -189,12 +201,13 @@ class Kbucket:
 class RoutingTree:
     ''' RoutingTree represents the collection of buckets which contain
     all nodes an individual node knows about '''
-    def __init__(self, node, k=20, error_threshold=5):
+    def __init__(self, node, k=20, error_threshold=5, b=5):
         self.k       = k
         self.error_threshold = error_threshold
+        self.b       = b
         self.node    = node
         self.buckets = []
-        self.buckets.append(Kbucket(k, 0, 2**160, self.error_threshold))
+        self.buckets.append(Kbucket(k, 0, (2**160)-1, self.error_threshold))
         self.addNode(self.node)
 
     def bucketIndex(self, n):
@@ -208,8 +221,10 @@ class RoutingTree:
           be updated.
         * If the bucket is full and the owning node exists in that bucket then
           the bucket will be split
-        * If the bucket is full and it is not the owning noding then the node
-          has not been seen for the longest will be returned.
+        * If the bucket is full and thd depth of the bucket is less than 5 then the
+          bucket will be split
+        * If the bucket is full and it is not the owning noding or the depth is > self.b
+          then the node has not been seen for the longest will be returned.
           It is the callers responsibility to call replaceStaleNode, if the
           stale node does not respond.
         '''
@@ -219,6 +234,10 @@ class RoutingTree:
         except KbucketFull:
             if self.buckets[index].range_min <= self.node < self.buckets[index].range_max:
                 # our node is in this bucket, split it
+                self._splitBucket(self.buckets[index])
+            elif self.buckets[index].getDepth() < self.b:
+                # depth of bucket (depth is the length of the prefix shared
+                # by all nodes in the k-bucket's range
                 self._splitBucket(self.buckets[index])
             else:
                 return self.buckets[index].getLeastRecentlySeen()
@@ -306,3 +325,12 @@ class RoutingTree:
         kind '''
         index = self.bucketIndex(node)
         self.buckets[index].errorNode(node)
+
+    def returnStats(self):
+        ''' return some statistics about the routing tree
+        '''
+        s = { 'buckets' : len(self.buckets),
+              'total_nodes' : 0}
+
+        for bucket in self.buckets:
+            s['total_nodes'] += len(bucket)
