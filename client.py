@@ -503,7 +503,7 @@ class Rpc_Client:
             c = 0
             for i in self.routing.buckets:
                 c = c + len(i.nodes)
-            self.log("Know about %s nodes" % c)
+            #self.log("Know about %s nodes, in %s buckets" % (c, len(self.routing.buckets)))
 
     def main(self, wait = None):
         if wait is not None:

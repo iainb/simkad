@@ -9,12 +9,11 @@ import random
 def client_actions(client, nodes):
     count =  0
     stored = {}
-    gevent.sleep(random.randint(0,30))
+    gevent.sleep(random.randint(0,1))
     client._join_network(nodes)
 
     while True:
         gevent.sleep(5)
-        '''
         if random.random() < 0.25:
             key = '%s_%s' % (client.node.id, count)
             value = str(count)
@@ -29,7 +28,6 @@ def client_actions(client, nodes):
                 print 'ok good job'
             else:
                 print 'failed, expected %s, found %s' % (stored[key], value)
-        '''
 
 def client_summary(clients):
     def bucket_stats(c):
@@ -78,5 +76,5 @@ def spawn_client(pool, network, initial_node=None):
 
 p = pool.Pool(100000)
 network = Simulate(False)
-p.spawn(spawn_clients, p, network, 5000)
+p.spawn(spawn_clients, p, network, 50)
 p.join()

@@ -1,6 +1,5 @@
 import unittest
-from mock import patch
-from routing import Kbucket, Node, KbucketFull, KbucketWrong, RoutingTree
+from routing import  Node, RoutingTree
 
 class TestRoutingTree(unittest.TestCase):
 
@@ -24,12 +23,14 @@ class TestRoutingTree(unittest.TestCase):
         for node in nodes:
             r.addNode(node)
 
-        self.assertEquals(len(r.buckets), 4)
-        expected = [(0,63),(64,127),(128,191),(192,255)]
+        # expected nodes split into buckets along with the bucket min/max
+        expected = [(0,15,[0]),(16,31,[25,30]),(32,63,[50]),
+                    (64,127,[100]),(128,191,[]),(192,223,[200]),
+                    (224,255,[255,230])]
+
         for i in zip(r.buckets, expected):
-            bucket, (mi, mx) = i
+            bucket, (mi, mx, nodes) = i
             self.assertEqual(bucket.range_min, mi)
             self.assertEqual(bucket.range_max, mx)
-            # TODO ensure all nodes end up in the routing tree!
-            for j in bucket.nodes:
-                print j.id
+            for j in zip(bucket.nodes, nodes):
+                self.assertEqual(j[0].id, j[1])
