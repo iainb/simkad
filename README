@@ -1,0 +1,21 @@
+This is a work-in-progress implementation of the Kademlia DHT network in python.
+
+The design makes use of eventlet's queues and uses them as one might use
+channels in go. This allows for a structure where the low level RPC's and
+the higher level Kad functions can exist in separate layers.
+
+The higher level functions are implemented in a blocking manner, though many of
+them could be run in separate coroutines.
+
+
+Implemented so far:
+
+* Routing table with accelerated lookups
+* Simulated Network Layer for testing
+* RPCS:
+    * FIND_NODE
+    * FIND_VALUE
+    * STORE
+    * PING (though not used)
+* Routing table unit tests
+* test script
