@@ -5,8 +5,8 @@ channels in go. This allows for a structure where the low level RPC's and
 the higher level Kad functions can exist in separate layers.
 
 The higher level functions are implemented in a blocking manner, though many of
-them could be run in separate coroutines.
-
+them could be run concurrently in separate coroutines. I think the blocking
+implementation should be easier to reason about and understand.
 
 Implemented so far:
 
