@@ -26,8 +26,7 @@ class Simulate:
         isn't connected to the network
         '''
         if (addr, port) in self.queues:
-            m = { 'type' : 'rpc', 'data' : message }
-            m = json.loads(json.dumps(m))
+            m = json.loads(json.dumps(message))
             self.queues[(addr, port)].put(m, block=False)
             self.log("%s => %s:%s" % (m, addr, port))
         else:

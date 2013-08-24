@@ -43,13 +43,11 @@ class Kad_Client:
         return m, chan
 
     def blocking_send_message(self, message):
-        m = { 'type' : 'int', 'data' : message }
-        self.rpc_chan.put(m)
+        self.rpc_chan.put(message)
         return message['chan'].get(block=True)
 
     def send_message(self, message):
-        m = { 'type' : 'int', 'data' : message }
-        self.rpc_chan.put(m)
+        self.rpc_chan.put(message)
 
     def join_network(self, nodes):
         self.pool.spawn(self._join_network, nodes)
@@ -203,7 +201,7 @@ class Rpc_Client:
         if node == None:
             node = Node(None, None, None)
 
-        self.addr, self.port = self.network.connect(self.chan, node.addr, node.port)
+        self.addr, self.port = self.network.connect(self.chan.fetch_chan('rpc'), node.addr, node.port)
         node.addr = self.addr
         node.port = self.port
 
@@ -235,7 +233,6 @@ class Rpc_Client:
 
         self.data_store = simple()
         self.rpc_xids = {}
-        self.timers = {}
         self.debug = True
 
     def log(self, message):
@@ -243,6 +240,7 @@ class Rpc_Client:
             print "%s: %s" % (self.node, message)
 
     def int_add_node(self, message):
+        ''' add a node to the routing tree '''
         if 'data' in message:
             if type(message['data']) == list:
                 for node in message['data']:
@@ -254,6 +252,7 @@ class Rpc_Client:
             message['chan'].put(False)
 
     def int_find_closest_nodes(self, message):
+        ''' find the closest nodes to a given node from the routing tree '''
         if 'data' in message:
             nodes = self.routing.findClosestNodes(message['data'])
             message['chan'].put(nodes)
@@ -261,17 +260,20 @@ class Rpc_Client:
             message['chan'].put([])
 
     def int_send_find_node(self, message):
+        ''' send find node message '''
         if 'data' in message:
             d = message['data']
             self.rpc_perform_find_node(d['node'], d['req_node'], message['chan'])
 
     def int_refresh_buckets(self, message):
+        ''' refresh buckets '''
         self.perform_refresh_buckets(True)
 
         if 'chan' in message:
             message['chan'].put(True)
 
     def int_store_value(self, message):
+        ''' store a value on the kad network '''
         self.rpc_perform_store(message['data']['node'],
                                message['data']['key'],
                                message['data']['value'])
@@ -281,20 +283,25 @@ class Rpc_Client:
             d = message['data']
             self.rpc_perform_find_value(d['node'], d['key'], message['chan'])
 
-    def check_timer(self, name, wait):
-        if name in self.timers:
-            now = time.time()
-            if (now - self.timers[name]) >= wait:
-                self.timers[name] = now
-                return True
-            else:
-                return False
-        else:
-            self.timers[name] = time.time()
-            return False
-
     def return_node(self):
+        ''' return a copy of our node '''
         return Node(self.node.addr, self.node.port, self.node.id)
+
+    def rpc_handle_timeouts(self):
+        ''' look through our in progress rpc's and timeout any which
+        we haven't got a response from within the timeout period '''
+        now = time.time()
+        to_delete = []
+        for xid in self.rpc_xids:
+            transaction = self.rpc_xids[xid]
+            running = now - transaction['sent']
+            if running > transaction['timeout']:
+                if transaction['chan'] != None:
+                    pass
+                to_delete.append(xid)
+
+        for xid in to_delete:
+            del self.rpc_xids[xid]
 
     def rpc_add_transaction(self, xid, m_type, dest_node, chan = None, timeout = None):
 
@@ -473,11 +480,11 @@ class Rpc_Client:
         self.network.send(addr, port, message)
 
     def int_handle_message(self, m):
-        ''' handle messages from ourselves '''
+        ''' handle internal (non rpc) message '''
         if 'type' in m and m['type'] in self.internal_actions:
             self.internal_actions[m['type']](m)
         else:
-            self.log("process_internal_message: malformed: %s" % m)
+            self.log("int_handle_message: malformed: %s" % m)
 
     def perform_refresh_buckets(self, force=False):
         ''' refresh buckets performs a find_node rpc against
@@ -493,29 +500,17 @@ class Rpc_Client:
         * timing out rpc requests
         * refreshing buckets
         '''
+        self.rpc_handle_timeouts()
+        self.perform_refresh_buckets()
 
-        # refresh any buckets which need refreshing
-        if self.check_timer('refresh_buckets', 60):
-            self.perform_refresh_buckets()
-
-        # debug info - delete this
-        if self.check_timer('debug', 5):
-            c = 0
-            for i in self.routing.buckets:
-                c = c + len(i.nodes)
-            #self.log("Know about %s nodes, in %s buckets" % (c, len(self.routing.buckets)))
-
-    def main(self, wait = None):
-        if wait is not None:
-            gevent.sleep(wait)
-
+    def main(self):
         while True:
             try:
-                message = self.chan.get(block=True, timeout=5)
-                if 'type' in message and message['type'] == 'rpc':
-                    self.rpc_handle_message(message['data'])
-                elif 'type' in message and message['type'] == 'int':
-                    self.int_handle_message(message['data'])
+                chan, message = self.chan.get(block=True, timeout=2)
+                if chan == 'rpc':
+                    self.rpc_handle_message(message)
+                elif chan == 'int':
+                    self.int_handle_message(message)
                 else:
                     self.log('unhandled message: %s' % message)
             except Empty: pass
