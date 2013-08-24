@@ -7,6 +7,15 @@ class TestRoutingTree(unittest.TestCase):
          r = RoutingTree(Node(None, None, 100))
          self.assertIsInstance(r, RoutingTree)
 
+    def test_add_node(self):
+        node = Node(None, None, 100)
+        tree = RoutingTree(node, 2, 5, 5, 8)
+
+        add_node = Node(None, None, 25)
+        self.assertEqual(tree.addNode(add_node), None)
+        index = tree.bucketIndex(add_node)
+        self.assertIn(add_node, tree.buckets[index].nodes)
+
     def test_split_bucket(self):
         this = Node(None, None, 100)
         r = RoutingTree(this, 2, 5, 5, 8)
